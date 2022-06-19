@@ -5,6 +5,7 @@
 from email import message
 import itertools
 import json
+from operator import itemgetter
 from os import abort
 from threading import local
 import dateutil.parser
@@ -54,61 +55,16 @@ class Venue(db.Model):
     website_link = db.Column(db.String(120))
     
 
-    def insert(self):
-        """Adds this instance to the session and then persist it to the database."""
-        db.session.add(self)
-        db.session.commit()
-    def update(self):
-        """Persists any changes made to the database."""
-        db.session.commit()
-    def delete(self):
-        """Deletes this instance then persist it to the database."""
-        db.session.delete(self)
-        db.session.commit()
+    #website = db.Column(db.String(120))
+    seeking_talent = db.Column(db.Boolean, default=False)
+    seeking_description = db.Column(db.String(120))
 
-    @property
-    def past_shows(self):
-        """:obj:`list` of :obj:`dict`: Gets past shows dictionary containing `artist_id`,
-            `artist_name`, `artist_image_link` and `start_time`.
-        """
-        past_shows = list(filter(lambda show: show.start_time < datetime.now(), self.shows))
-        return [{'artist_id':show.artist.id,  'artist_name':show.artist.name,  'artist_image_link':show.artist.image_link,  'start_time':show.start_time.isoformat()} for show in past_shows]
+    # Venue is the parent (one-to-many) of a Show (Artist is also a foreign key, in def. of Show)
+    # In the parent is where we put the db.relationship in SQLAlchemy
+    shows = db.relationship('Show', backref='venue', lazy=True)    # Can reference show.venue (as well as venue.shows)
 
-    @property
-    def upcoming_shows(self):
-        """:obj:`list` of :obj:`dict`: Gets upcoming shows dictionary containing `artist_id`,
-            `artist_name`, `artist_image_link` and `start_time`.
-        """
-        upcoming_shows = list(filter(lambda show: show.start_time > datetime.now(), self.shows))
-        return [{'artist_id':show.artist.id,  'artist_name':show.artist.name,  'artist_image_link':show.artist.image_link,  'start_time':show.start_time.isoformat()} for show in upcoming_shows]
-
-    @property
-    def past_shows_count(self):
-        """int: Gets past shows count."""
-        return len(self.past_shows)
-
-    @property
-    def upcoming_shows_count(self):
-        """int: Gets upcoming shows count."""
-        return len(self.past_shows)
-
-    def format(self):
-        """dict: Gets this instance as a dictionary containing all attributes."""
-        return {'id':self.id, 
-         'name':self.name, 
-         'genres':self.genres.split(', '), 
-         'address':self.address, 
-         'city':self.city, 
-         'state':self.state, 
-         'phone':self.phone, 
-         'website_link':self.website_link, 
-         'facebook_link':self.facebook_link, 
-         'image_link':self.image_link, 
-         'past_shows':self.past_shows, 
-         'upcoming_shows':self.upcoming_shows, 
-         'past_shows_count':self.past_shows_count, 
-         'upcoming_shows_count':self.upcoming_shows_count}
-
+    def __repr__(self):
+        return f'<Venue {self.id} {self.name}>'
     
     # TODO: implement any missing fields, as a database migration using Flask-Migrate
 
@@ -213,11 +169,46 @@ def index():
 def venues():
     """Renders venues page."""
     venues = Venue.query.all()
-    keyfunc = lambda v: (
-     v['city'], v['state'])
-    sorted_venues = sorted(venues, key=keyfunc)
-    grouped_venues = itertools.groupby(sorted_venues, key=keyfunc)
-    data = [{'city':key[0],  'state':key[1],  'venues':list(data)} for key, data in grouped_venues]
+    data = []   # A list of dictionaries, where city, state, and venues are dictionary keys
+
+    # Create a set of all the cities/states combinations uniquely
+    cities_states = set()
+    for venue in venues:
+        cities_states.add( (venue.city, venue.state) )  # Add tuple
+    
+    # Turn the set into an ordered list
+    cities_states = list(cities_states)
+    cities_states.sort(key=itemgetter(1,0)) 
+
+    now = datetime.now()   
+
+    
+    for loc in cities_states:
+    
+        venues_list = []
+        for venue in venues:
+            if (venue.city == loc[0]) and (venue.state == loc[1]):
+
+           
+                venue_shows = Show.query.filter_by(venue_id=venue.id).all()
+                num_upcoming = 0
+                for show in venue_shows:
+                    if show.start_time > now:
+                        num_upcoming += 1
+
+                venues_list.append({
+                    "id": venue.id,
+                    "name": venue.name,
+                    "num_upcoming_shows": num_upcoming
+                })
+
+        
+        data.append({
+            "city": loc[0],
+            "state": loc[1],
+            "venues": venues_list
+        })
+
     return render_template('pages/venues.html', areas=data)
   
 
@@ -237,11 +228,59 @@ def search_venues():
 def show_venue(venue_id):
   # shows the venue page with the given venue_id
   # TODO: replace with real venue data from the venues table, using venue_id 
-    venue = Venue.query.filter_by(id=venue_id).first()
-    if venue is None:
-        return abort(404)
-    else:
-        data = venue.format()
+     venue = Venue.query.get(venue_id)   # Returns object by primary key, or None
+     print(venue)
+     if not venue:
+        # Didn't return one, user must've hand-typed a link into the browser that doesn't exist
+        # Redirect home
+        return redirect(url_for('index'))
+     else:
+        # genres needs to be a list of genre strings for the template
+        genres = [ genre.name for genre in venue.genres ]
+        
+        # Get a list of shows, and count the ones in the past and future
+        past_shows = []
+        past_shows_count = 0
+        upcoming_shows = []
+        upcoming_shows_count = 0
+        now = datetime.now()
+        for show in venue.shows:
+            if show.start_time > now:
+                upcoming_shows_count += 1
+                upcoming_shows.append({
+                    "artist_id": show.artist_id,
+                    "artist_name": show.artist.name,
+                    "artist_image_link": show.artist.image_link,
+                    "start_time": format_datetime(str(show.start_time))
+                })
+            if show.start_time < now:
+                past_shows_count += 1
+                past_shows.append({
+                    "artist_id": show.artist_id,
+                    "artist_name": show.artist.name,
+                    "artist_image_link": show.artist.image_link,
+                    "start_time": format_datetime(str(show.start_time))
+                })
+
+        data = {
+            "id": venue_id,
+            "name": venue.name,
+            "genres": genres,
+            "address": venue.address,
+            "city": venue.city,
+            "state": venue.state,
+            # Put the dashes back into phone number
+            "phone": (venue.phone[:3] + '-' + venue.phone[3:6] + '-' + venue.phone[6:]),
+            "website_link": venue.website_link,
+            "facebook_link": venue.facebook_link,
+            "seeking_talent": venue.seeking_talent,
+            "seeking_description": venue.seeking_description,
+            "image_link": venue.image_link,
+            "past_shows": past_shows,
+            "past_shows_count": past_shows_count,
+            "upcoming_shows": upcoming_shows,
+            "upcoming_shows_count": upcoming_shows_count
+        }
         return render_template('pages/show_venue.html', venue=data)
   
 #  Create Venue
@@ -257,35 +296,66 @@ def create_venue_submission():
   # TODO: insert form data as a new Venue record in the db, instead
   # TODO: modify data to be the data object returned from db insertion
   form = VenueForm()
-  if not form.validate_on_submit():
-        error_message = 'There are errors within the form. Please review it firstly.'
-  else:
-        try:
-            venue_name = form.name.data
-            exists = db.session.query(Venue.id).filter_by(name=venue_name).scalar() is not None
-            if exists:
-                error_message = f"Venue {venue_name} is already registered!"
-            else:
-                new_venue = Venue(name=venue_name,
-                  genres=(', '.join(form.genres.data)),
-                  city=(form.city.data),
-                  state=(form.state.data),
-                  address=(form.address.data),
-                  phone=(form.phone.data),
-                  facebook_link=(form.facebook_link.data))
-                new_venue.insert()
-                flash(f"Venue {venue_name} was successfully created!", 'success')
-                return redirect(url_for('show_venue', venue_id=(new_venue.id)))
-        except exec.SQLAlchemyError as error:
-            try:
-                Logger.exception(error, exc_info=True)
-                error_message = f"An error occurred. Venue {venue_name} could not be created."
-            finally:
-                error = None
-                del error
+  name = form.name.data.strip()
+  city = form.city.data.strip()
+  state = form.state.data
+  address = form.address.data.strip()
+  phone = form.phone.data
 
-        if error_message is not None:
-            flash(error_message, 'danger')
+  genres = form.genres.data                 
+  seeking_talent = True if form.seeking_talent.data == 'Yes' else False
+  seeking_description = form.seeking_description.data.strip()
+  image_link = form.image_link.data.strip()
+  website_link = form.website_link.data.strip()
+  facebook_link = form.facebook_link.data.strip()
+    
+    # Redirect back to form if errors in form validation
+  if not form.validate():
+        flash( form.errors )
+        return redirect(url_for('create_venue_submission'))
+
+  else:
+        error_in_insert = False
+
+        # Insert form data into DB
+        try:
+            # creates the new venue with all fields but not genre yet
+            new_venue = Venue(name=name, city=city, state=state, address=address, phone=phone, \
+                seeking_talent=seeking_talent, seeking_description=seeking_description, image_link=image_link, \
+                website_link=website_link, facebook_link=facebook_link)
+            # genres can't take a list of strings, it needs to be assigned to db objects
+            # genres from the form is like: ['Alternative', 'Classical', 'Country']
+            for genre in genres:
+                # fetch_genre = session.query(Genre).filter_by(name=genre).one_or_none()  # Throws an exception if more than one returned, returns None if none
+                fetch_genre = genre.query.filter_by(name=genre).one_or_none()  # Throws an exception if more than one returned, returns None if none
+                if fetch_genre:
+                    # if found a genre, append it to the list
+                    new_venue.genres.append(fetch_genre)
+
+                else:
+                    # fetch_genre was None. It's not created yet, so create it
+                    new_genre = genre(name=genre)
+                    db.session.add(new_genre)
+                    new_venue.genres.append(new_genre)  # Create a new Genre item and append it
+
+            db.session.add(new_venue)
+            db.session.commit()
+        except Exception as e:
+            error_in_insert = True
+            print(f'Exception "{e}" in create_venue_submission()')
+            db.session.rollback()
+        finally:
+            db.session.close()
+
+        if not error_in_insert:
+            # on successful db insert, flash success
+            flash('Venue ' + request.form['name'] + ' was successfully listed!')
+            return redirect(url_for('index'))
+        else:
+            flash('An error occurred. Venue ' + name + ' could not be listed.')
+            print("Error in create_venue_submission()")
+            # return redirect(url_for('create_venue_submission'))
+            abort(500)
         return render_template('forms/new_venue.html', form=form)
 
 @app.route('/venues/<venue_id>', methods=['DELETE'])
